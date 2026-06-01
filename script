@@ -1,5 +1,6 @@
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local Workspace        = game:GetService("Workspace")
 
 local player    = Players.LocalPlayer
@@ -71,6 +72,9 @@ local function getNearestPlant()
 end
 
 local function equipTomatoShooter()
+    if character:FindFirstChild("Tomato Shooter") then
+        return true
+    end
     local backpack = player:FindFirstChild("Backpack")
     if backpack then
         local tool = backpack:FindFirstChild("Tomato Shooter")
@@ -79,9 +83,6 @@ local function equipTomatoShooter()
             return true
         end
     end
-    if character:FindFirstChild("Tomato Shooter") then
-        return true
-    end
     return false
 end
 
@@ -89,6 +90,9 @@ local aimTimer = 0
 local AIM_RATE = 0.05
 
 local function startPlantKill()
+    -- ставим камеру один раз тут, не внутри цикла
+    camera.CameraType = Enum.CameraType.Scriptable
+
     plantKillConn = RunService.RenderStepped:Connect(function(dt)
         if not plantKillActive then return end
 
@@ -104,12 +108,10 @@ local function startPlantKill()
 
         local myPos     = rootPart.Position + Vector3.new(0, 1.5, 0)
         local targetPos = target.Position
+        local back      = (myPos - targetPos).Unit * 8
+        local camPos    = myPos + back + Vector3.new(0, 2, 0)
 
-        local back   = (myPos - targetPos).Unit * 8
-        local camPos = myPos + back + Vector3.new(0, 2, 0)
-
-        camera.CameraType = Enum.CameraType.Scriptable
-        camera.CFrame     = CFrame.new(camPos, targetPos)
+        camera.CFrame = CFrame.new(camPos, targetPos)
     end)
 end
 
@@ -215,7 +217,6 @@ end
 
 local function startBees()
     task.spawn(function()
-        -- ждём папку если ещё не загрузилась
         local tries = 0
         while not honeycombFolder and tries < 20 do
             task.wait(0.5)
@@ -235,14 +236,12 @@ local function startBees()
             end
         end
 
-        -- выключили — чистим платформы
         unwatchHoneycombs()
     end)
 end
 
 local function stopBees()
     beeActive = false
-    -- unwatchHoneycombs вызовется из task.spawn выше когда цикл завершится
 end
 
 -- ================================================
@@ -258,10 +257,12 @@ local function startAntiAfk()
         afkTimer = afkTimer + dt
         if afkTimer < AFK_INTERVAL then return end
         afkTimer = 0
-        -- прыгаем один раз
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            humanoid.Jump = true
+        -- прыгаем через VirtualInputManager — надёжнее чем humanoid.Jump
+        local vInput = game:GetService("VirtualInputManager")
+        if vInput then
+            vInput:SendKeyEvent(true,  Enum.KeyCode.Space, false, game)
+            task.wait(0.1)
+            vInput:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
         end
     end)
 end
@@ -340,60 +341,73 @@ local function makeBtn(labelText, yPos)
     return btn, s
 end
 
-local plantBtn, plantStroke = makeBtn("🌿 Авто Убийство Растений", 48)
-local beeBtn,   beeStroke   = makeBtn("🐝 Пчёлы",                 102)
-local afkBtn,   afkStroke   = makeBtn("💤 Анти-АФК",              156)
+local plantBtn, plantStroke = makeBtn("🌿 Авто Убийство Растений [H]", 48)
+local beeBtn,   beeStroke   = makeBtn("🐝 Пчёлы [J]",                 102)
+local afkBtn,   afkStroke   = makeBtn("💤 Анти-АФК [K]",              156)
 
--- клик по кнопке растений
-plantBtn.MouseButton1Click:Connect(function()
+-- вынес логику переключения в отдельные функции чтоб хоткеи и кнопки делали одно и то же
+
+local function togglePlant()
     plantKillActive = not plantKillActive
     if plantKillActive then
         startPlantKill()
-        plantBtn.Text             = "■  🌿 Авто Убийство Растений  [ВКЛ]"
+        plantBtn.Text             = "■  🌿 Авто Убийство Растений [H]  [ВКЛ]"
         plantBtn.TextColor3       = Color3.fromRGB(100, 255, 140)
         plantBtn.BackgroundColor3 = Color3.fromRGB(10, 40, 20)
         plantStroke.Color         = Color3.fromRGB(60, 200, 100)
     else
         stopPlantKill()
-        plantBtn.Text             = "▶  🌿 Авто Убийство Растений  [ВЫКЛ]"
+        plantBtn.Text             = "▶  🌿 Авто Убийство Растений [H]  [ВЫКЛ]"
         plantBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
         plantBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
         plantStroke.Color         = Color3.fromRGB(60, 60, 90)
     end
-end)
+end
 
-beeBtn.MouseButton1Click:Connect(function()
+local function toggleBees()
     beeActive = not beeActive
     if beeActive then
-        startBees() -- beeActive уже true, цикл внутри не выйдет сразу
-        beeBtn.Text             = "■  🐝 Пчёлы  [ВКЛ]"
+        startBees()
+        beeBtn.Text             = "■  🐝 Пчёлы [J]  [ВКЛ]"
         beeBtn.TextColor3       = Color3.fromRGB(255, 220, 80)
         beeBtn.BackgroundColor3 = Color3.fromRGB(40, 35, 0)
         beeStroke.Color         = Color3.fromRGB(220, 180, 30)
     else
         stopBees()
-        beeBtn.Text             = "▶  🐝 Пчёлы  [ВЫКЛ]"
+        beeBtn.Text             = "▶  🐝 Пчёлы [J]  [ВЫКЛ]"
         beeBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
         beeBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
         beeStroke.Color         = Color3.fromRGB(60, 60, 90)
     end
-end)
+end
 
-afkBtn.MouseButton1Click:Connect(function()
+local function toggleAfk()
     afkActive = not afkActive
     if afkActive then
         startAntiAfk()
-        afkBtn.Text             = "■  💤 Анти-АФК  [ВКЛ]"
+        afkBtn.Text             = "■  💤 Анти-АФК [K]  [ВКЛ]"
         afkBtn.TextColor3       = Color3.fromRGB(150, 180, 255)
         afkBtn.BackgroundColor3 = Color3.fromRGB(10, 20, 50)
         afkStroke.Color         = Color3.fromRGB(80, 120, 255)
     else
         stopAntiAfk()
-        afkBtn.Text             = "▶  💤 Анти-АФК  [ВЫКЛ]"
+        afkBtn.Text             = "▶  💤 Анти-АФК [K]  [ВЫКЛ]"
         afkBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
         afkBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
         afkStroke.Color         = Color3.fromRGB(60, 60, 90)
     end
+end
+
+plantBtn.MouseButton1Click:Connect(togglePlant)
+beeBtn.MouseButton1Click:Connect(toggleBees)
+afkBtn.MouseButton1Click:Connect(toggleAfk)
+
+-- хоткеи H / J / K
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.H then togglePlant() end
+    if input.KeyCode == Enum.KeyCode.J then toggleBees()  end
+    if input.KeyCode == Enum.KeyCode.K then toggleAfk()   end
 end)
 
 -- после смерти переподключаемся
