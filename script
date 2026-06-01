@@ -215,11 +215,15 @@ end
 
 local function startBees()
     task.spawn(function()
+        -- ждём папку если ещё не загрузилась
         local tries = 0
-        while not honeycombFolder and tries < 20 do task.wait(0.5); tries += 1 end
+        while not honeycombFolder and tries < 20 do
+            task.wait(0.5)
+            tries += 1
+        end
+        if not beeActive then return end
         watchHoneycombs()
-    end)
-    task.spawn(function()
+
         while beeActive do
             local nearest = getNearestHoneycomb()
             if nearest then
@@ -230,12 +234,15 @@ local function startBees()
                 task.wait(0.5)
             end
         end
+
+        -- выключили — чистим платформы
+        unwatchHoneycombs()
     end)
 end
 
 local function stopBees()
     beeActive = false
-    unwatchHoneycombs()
+    -- unwatchHoneycombs вызовется из task.spawn выше когда цикл завершится
 end
 
 -- ================================================
@@ -358,7 +365,7 @@ end)
 beeBtn.MouseButton1Click:Connect(function()
     beeActive = not beeActive
     if beeActive then
-        startBees()
+        startBees() -- beeActive уже true, цикл внутри не выйдет сразу
         beeBtn.Text             = "■  🐝 Пчёлы  [ВКЛ]"
         beeBtn.TextColor3       = Color3.fromRGB(255, 220, 80)
         beeBtn.BackgroundColor3 = Color3.fromRGB(40, 35, 0)
