@@ -1,10 +1,9 @@
 -- AutoScript.lua
--- LocalScript → StarterPlayerScripts
+-- LocalScript → кидай в StarterPlayerScripts
 
-local Players       = game:GetService("Players")
-local RunService    = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local Workspace     = game:GetService("Workspace")
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local Workspace        = game:GetService("Workspace")
 
 local player    = Players.LocalPlayer
 local camera    = Workspace.CurrentCamera
@@ -13,9 +12,7 @@ local rootPart  = character:WaitForChild("HumanoidRootPart")
 
 local InteractiveEvents = Workspace:WaitForChild("InteractiveEvents")
 
--- ========================
---   КЭШИРОВАННЫЕ ПАПКИ
--- ========================
+-- папки кэшируем один раз при старте, чтобы не дёргать WaitForChild каждый кадр
 local plantRuntime    = nil
 local honeycombFolder = nil
 
@@ -35,20 +32,20 @@ task.spawn(function()
     end
 end)
 
--- ========================
---       СТЕЙТ
--- ========================
-local zombieActive = false
-local beeActive    = false
-local afkActive    = false
-local zombieConn   = nil
-local afkConn      = nil
-local platforms    = {}
+-- состояние трёх функций
+local plantKillActive = false
+local beeActive       = false
+local afkActive       = false
 
--- ========================
---    ЗОМБИ — aimbot
--- ========================
--- Находим ближайший Plant к игроку и наводим камеру на него
+local plantKillConn   = nil
+local afkConn         = nil
+
+-- платформы под сотами
+local platforms = {}
+
+-- ================================================
+--   АВТО УБИЙСТВО РАСТЕНИЙ
+-- ================================================
 
 local plantNames = {
     ["Small Plant"]  = true,
@@ -57,22 +54,16 @@ local plantNames = {
     ["Boss Plant"]   = true,
 }
 
-local zombieTimer    = 0
-local ZOMBIE_INTERVAL = 0.1  -- обновление каждые 0.1 сек
-
+-- ищем ближайший Plant к игроку
 local function getNearestPlant()
     if not plantRuntime then return nil end
     local myPos = rootPart.Position
     local nearest, bestDist = nil, math.huge
-    -- GetChildren() — только прямые дети, быстро
     for _, child in ipairs(plantRuntime:GetChildren()) do
         if plantNames[child.Name] then
-            local part = nil
-            if child:IsA("Model") then
-                part = child.PrimaryPart
-            elseif child:IsA("BasePart") then
-                part = child
-            end
+            local part = child:IsA("Model") and child.PrimaryPart
+                      or child:IsA("BasePart") and child
+                      or nil
             if part then
                 local d = (part.Position - myPos).Magnitude
                 if d < bestDist then
@@ -85,63 +76,88 @@ local function getNearestPlant()
     return nearest
 end
 
-local function startZombie()
-    -- Переключаем камеру в Scriptable чтобы управлять ею
-    camera.CameraType = Enum.CameraType.Scriptable
+-- берём Tomato Shooter из инвентаря если он там есть
+local function equipTomatoShooter()
+    local backpack = player:FindFirstChild("Backpack")
+    if backpack then
+        local tool = backpack:FindFirstChild("Tomato Shooter")
+        if tool then
+            -- перемещаем в Character — это и есть экипировка тула
+            tool.Parent = character
+            return true
+        end
+    end
+    -- может уже в руках
+    if character:FindFirstChild("Tomato Shooter") then
+        return true
+    end
+    return false
+end
 
-    zombieConn = RunService.RenderStepped:Connect(function(dt)
-        if not zombieActive then return end
+local aimTimer   = 0
+local AIM_RATE   = 0.05  -- обновление прицела ~20 раз в сек, этого хватает
 
-        zombieTimer = zombieTimer + dt
-        if zombieTimer < ZOMBIE_INTERVAL then return end
-        zombieTimer = 0
+local function startPlantKill()
+    plantKillConn = RunService.RenderStepped:Connect(function(dt)
+        if not plantKillActive then return end
+
+        -- пытаемся взять шутер каждый тик пока не возьмём
+        local hasGun = equipTomatoShooter()
+        if not hasGun then return end
+
+        aimTimer = aimTimer + dt
+        if aimTimer < AIM_RATE then return end
+        aimTimer = 0
 
         local target = getNearestPlant()
-        if target and rootPart then
-            -- Наводим камеру: позиция за спиной игрока, смотрит на цель
-            local myPos    = rootPart.Position + Vector3.new(0, 2, 0)
-            local targetPos = target.Position
+        if not target or not rootPart then return end
 
-            -- Плавный LookAt
-            local desiredCF = CFrame.new(myPos, targetPos)
-            camera.CFrame   = desiredCF
-        end
+        -- камера смотрит на цель, позиция камеры остаётся за спиной игрока
+        -- используем стандартный офсет чтобы не было ощущения телепорта
+        local myPos     = rootPart.Position + Vector3.new(0, 1.5, 0)
+        local targetPos = target.Position
+
+        -- небольшой офсет камеры назад чтобы игрок был в кадре
+        local back = (myPos - targetPos).Unit * 8
+        local camPos = myPos + back + Vector3.new(0, 2, 0)
+
+        camera.CameraType = Enum.CameraType.Scriptable
+        camera.CFrame = CFrame.new(camPos, targetPos)
     end)
 end
 
-local function stopZombie()
-    zombieActive = false
-    if zombieConn then
-        zombieConn:Disconnect()
-        zombieConn = nil
+local function stopPlantKill()
+    plantKillActive = false
+    if plantKillConn then
+        plantKillConn:Disconnect()
+        plantKillConn = nil
     end
-    zombieTimer = 0
-    -- Возвращаем камеру в обычный режим
+    aimTimer = 0
+    -- возвращаем нормальную камеру
     camera.CameraType = Enum.CameraType.Custom
 end
 
--- ========================
---  ПЧЁЛЫ — платформы
--- ========================
-local PLATFORM_SIZE   = Vector3.new(10, 1, 10)
-local PLATFORM_OFFSET = Vector3.new(0, -2, 0)
+-- ================================================
+--   ПЧЁЛЫ — платформы + телепорт
+-- ================================================
 
 local function createPlatform(honeycomb)
     if platforms[honeycomb] then return end
-    local target = (honeycomb:IsA("Model") and honeycomb.PrimaryPart) or
-                   (honeycomb:IsA("BasePart") and honeycomb)
+    local target = honeycomb:IsA("Model") and honeycomb.PrimaryPart
+                or honeycomb:IsA("BasePart") and honeycomb
+                or nil
     if not target then return end
 
     local part = Instance.new("Part")
     part.Name         = "HoneycombPlatform"
-    part.Size         = PLATFORM_SIZE
+    part.Size         = Vector3.new(10, 1, 10)
     part.Anchored     = true
     part.CanCollide   = true
     part.CastShadow   = false
     part.Material     = Enum.Material.SmoothPlastic
     part.Color        = Color3.fromRGB(255, 200, 50)
     part.Transparency = 0.25
-    part.CFrame       = CFrame.new(target.Position + PLATFORM_OFFSET)
+    part.CFrame       = CFrame.new(target.Position + Vector3.new(0, -2, 0))
     part.Parent       = Workspace
     platforms[honeycomb] = part
 
@@ -182,9 +198,6 @@ local function unwatchHoneycombs()
     removeAllPlatforms()
 end
 
--- ========================
---    ПЧЁЛЫ — телепорт
--- ========================
 local function pressE()
     local vInput = game:GetService("VirtualInputManager")
     if vInput then
@@ -202,8 +215,9 @@ local function getNearestHoneycomb()
     local nearest, bestDist = nil, math.huge
     for _, comb in ipairs(honeycombFolder:GetChildren()) do
         if comb.Name == "Honeycomb" then
-            local part = (comb:IsA("Model") and comb.PrimaryPart) or
-                         (comb:IsA("BasePart") and comb)
+            local part = comb:IsA("Model") and comb.PrimaryPart
+                      or comb:IsA("BasePart") and comb
+                      or nil
             if part then
                 local d = (part.Position - pos).Magnitude
                 if d < bestDist then bestDist = d; nearest = part end
@@ -238,13 +252,12 @@ local function stopBees()
     unwatchHoneycombs()
 end
 
--- ========================
---      АНТИ-АФК
--- ========================
--- Каждые 60 сек делаем мелкое движение мышью — сбрасывает таймер АФК Roblox
+-- ================================================
+--   АНТИ-АФК
+-- ================================================
 
-local afkTimer = 0
-local AFK_INTERVAL = 60
+local afkTimer    = 0
+local AFK_INTERVAL = 55  -- чуть меньше минуты, с запасом
 
 local function startAntiAfk()
     afkConn = RunService.Heartbeat:Connect(function(dt)
@@ -252,11 +265,8 @@ local function startAntiAfk()
         afkTimer = afkTimer + dt
         if afkTimer < AFK_INTERVAL then return end
         afkTimer = 0
-        -- Имитируем небольшое движение камеры
         local vInput = game:GetService("VirtualInputManager")
         if vInput then
-            vInput:SendMouseButtonEvent(0, 0, 0, true,  game, 1)
-            vInput:SendMouseButtonEvent(0, 0, 0, false, game, 1)
             vInput:SendMouseMoveEvent(1, 0, game)
             task.wait(0.05)
             vInput:SendMouseMoveEvent(-1, 0, game)
@@ -270,34 +280,34 @@ local function stopAntiAfk()
     afkTimer = 0
 end
 
--- ========================
---         GUI
--- ========================
+-- ================================================
+--   GUI
+-- ================================================
+
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name           = "AutoMenu"
 screenGui.ResetOnSpawn   = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent         = player.PlayerGui
 
--- Фрейм (увеличен для 3 кнопок)
 local frame = Instance.new("Frame")
-frame.Size             = UDim2.new(0, 220, 0, 210)
-frame.Position         = UDim2.new(0.5, -110, 0, 20)
+frame.Size             = UDim2.new(0, 240, 0, 220)
+frame.Position         = UDim2.new(0.5, -120, 0, 20)
 frame.BackgroundColor3 = Color3.fromRGB(12, 12, 20)
 frame.BorderSizePixel  = 0
 frame.Active           = true
 frame.Draggable        = true
 frame.Parent           = screenGui
 
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 10)
-corner.Parent       = frame
+local fCorner = Instance.new("UICorner")
+fCorner.CornerRadius = UDim.new(0, 10)
+fCorner.Parent       = frame
 
-local stroke = Instance.new("UIStroke")
-stroke.Color        = Color3.fromRGB(80, 160, 255)
-stroke.Thickness    = 1.5
-stroke.Transparency = 0.4
-stroke.Parent       = frame
+local fStroke = Instance.new("UIStroke")
+fStroke.Color        = Color3.fromRGB(80, 160, 255)
+fStroke.Thickness    = 1.5
+fStroke.Transparency = 0.4
+fStroke.Parent       = frame
 
 local title = Instance.new("TextLabel")
 title.Size             = UDim2.new(1, 0, 0, 36)
@@ -310,53 +320,53 @@ title.Font             = Enum.Font.GothamBold
 title.TextSize         = 15
 title.Parent           = frame
 
-local titleCorner = Instance.new("UICorner")
-titleCorner.CornerRadius = UDim.new(0, 10)
-titleCorner.Parent       = title
+local tCorner = Instance.new("UICorner")
+tCorner.CornerRadius = UDim.new(0, 10)
+tCorner.Parent       = title
 
-local function makeToggleButton(labelText, yPos)
+local function makeBtn(labelText, yPos)
     local btn = Instance.new("TextButton")
-    btn.Size             = UDim2.new(0, 190, 0, 44)
-    btn.Position         = UDim2.new(0.5, -95, 0, yPos)
+    btn.Size             = UDim2.new(0, 205, 0, 44)
+    btn.Position         = UDim2.new(0.5, -102, 0, yPos)
     btn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
     btn.BorderSizePixel  = 0
     btn.Text             = "▶  " .. labelText .. "  [ВЫКЛ]"
     btn.TextColor3       = Color3.fromRGB(160, 160, 180)
     btn.Font             = Enum.Font.GothamSemibold
-    btn.TextSize         = 13
+    btn.TextSize         = 12
     btn.Parent           = frame
 
-    local bCorner = Instance.new("UICorner")
-    bCorner.CornerRadius = UDim.new(0, 8)
-    bCorner.Parent       = btn
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 8)
+    c.Parent       = btn
 
-    local bStroke = Instance.new("UIStroke")
-    bStroke.Color     = Color3.fromRGB(60, 60, 90)
-    bStroke.Thickness = 1
-    bStroke.Parent    = btn
+    local s = Instance.new("UIStroke")
+    s.Color     = Color3.fromRGB(60, 60, 90)
+    s.Thickness = 1
+    s.Parent    = btn
 
-    return btn, bStroke
+    return btn, s
 end
 
-local zombieBtn, zombieStroke = makeToggleButton("🧟 Зомби",    48)
-local beeBtn,    beeStroke    = makeToggleButton("🐝 Пчёлы",   102)
-local afkBtn,    afkStroke    = makeToggleButton("💤 Анти-АФК", 156)
+local plantBtn, plantStroke = makeBtn("🌿 Авто Убийство Растений", 48)
+local beeBtn,   beeStroke   = makeBtn("🐝 Пчёлы",                 102)
+local afkBtn,   afkStroke   = makeBtn("💤 Анти-АФК",              156)
 
--- Тоглы
-zombieBtn.MouseButton1Click:Connect(function()
-    zombieActive = not zombieActive
-    if zombieActive then
-        startZombie()
-        zombieBtn.Text             = "■  🧟 Зомби  [ВКЛ]"
-        zombieBtn.TextColor3       = Color3.fromRGB(100, 255, 140)
-        zombieBtn.BackgroundColor3 = Color3.fromRGB(10, 40, 20)
-        zombieStroke.Color         = Color3.fromRGB(60, 200, 100)
+-- клик по кнопке растений
+plantBtn.MouseButton1Click:Connect(function()
+    plantKillActive = not plantKillActive
+    if plantKillActive then
+        startPlantKill()
+        plantBtn.Text             = "■  🌿 Авто Убийство Растений  [ВКЛ]"
+        plantBtn.TextColor3       = Color3.fromRGB(100, 255, 140)
+        plantBtn.BackgroundColor3 = Color3.fromRGB(10, 40, 20)
+        plantStroke.Color         = Color3.fromRGB(60, 200, 100)
     else
-        stopZombie()
-        zombieBtn.Text             = "▶  🧟 Зомби  [ВЫКЛ]"
-        zombieBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
-        zombieBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-        zombieStroke.Color         = Color3.fromRGB(60, 60, 90)
+        stopPlantKill()
+        plantBtn.Text             = "▶  🌿 Авто Убийство Растений  [ВЫКЛ]"
+        plantBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
+        plantBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
+        plantStroke.Color         = Color3.fromRGB(60, 60, 90)
     end
 end)
 
@@ -394,11 +404,11 @@ afkBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- Сброс при смерти
+-- пересоздаём ссылки на character после смерти
 player.CharacterAdded:Connect(function(newChar)
     character = newChar
     rootPart  = newChar:WaitForChild("HumanoidRootPart")
     camera    = Workspace.CurrentCamera
-    if zombieActive then stopZombie(); zombieActive = true; startZombie() end
-    if beeActive    then stopBees();   beeActive    = true; startBees()  end
+    if plantKillActive then stopPlantKill(); plantKillActive = true; startPlantKill() end
+    if beeActive       then stopBees();      beeActive       = true; startBees()      end
 end)
