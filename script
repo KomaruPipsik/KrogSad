@@ -1,19 +1,33 @@
 -- AutoScript.lua
--- LocalScript: помести в StarterPlayerScripts или StarterGui
--- Функция "Зомби" — автонаводка растений на ближайших монстров
--- Функция "Пчёлы" — автотелепорт к Honeycomb + симуляция нажатия E
+-- LocalScript → StarterPlayerScripts
+-- Фикс: кэш папок (нет WaitForChild в Heartbeat), платформы под Honeycomb
 
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local Workspace          = game:GetService("Workspace")
 
-local player = Players.LocalPlayer
+local player    = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
-local rootPart = character:WaitForChild("HumanoidRootPart")
+local rootPart  = character:WaitForChild("HumanoidRootPart")
 
-local Workspace = game:GetService("Workspace")
-local InteractiveEvents = Workspace:WaitForChild("InteractiveEvents")
+local InteractiveEvents  = Workspace:WaitForChild("InteractiveEvents")
+
+-- ========================
+--   КЭШИРОВАННЫЕ ПАПКИ
+-- ========================
+-- Получаем один раз — никаких WaitForChild внутри Heartbeat
+local plantRuntime    = nil
+local honeycombFolder = nil
+
+task.spawn(function()
+    local plantRush = InteractiveEvents:WaitForChild("PlantRush")
+    plantRuntime    = plantRush:WaitForChild("Runtime")
+end)
+
+task.spawn(function()
+    local queenBee   = InteractiveEvents:WaitForChild("QueenBee")
+    honeycombFolder  = queenBee:WaitForChild("RuntimeHoneycombs")
+end)
 
 -- ========================
 --       СТЕЙТ
@@ -21,66 +35,34 @@ local InteractiveEvents = Workspace:WaitForChild("InteractiveEvents")
 local zombieActive = false
 local beeActive    = false
 local zombieConn   = nil
-local beeThread    = nil
 
--- ========================
---       УТИЛИТЫ
--- ========================
-local function getNearestFromFolder(folder, playerPos)
-    local nearest, bestDist = nil, math.huge
-    for _, obj in ipairs(folder:GetChildren()) do
-        local part = obj:IsA("Model") and obj.PrimaryPart or (obj:IsA("BasePart") and obj)
-        if part then
-            local d = (part.Position - playerPos).Magnitude
-            if d < bestDist then
-                bestDist = d
-                nearest  = part
-            end
-        end
-    end
-    return nearest, bestDist
-end
-
-local function faceTowards(fromPart, targetPos)
-    local dir = (targetPos - fromPart.Position) * Vector3.new(1, 0, 1)
-    if dir.Magnitude < 0.01 then return end
-    fromPart.CFrame = CFrame.new(fromPart.Position, fromPart.Position + dir.Unit)
-end
+-- Платформы под Honeycomb: [модель] = Part
+local platforms = {}
 
 -- ========================
 --    ЗОМБИ — PlantRush
 -- ========================
-local plantNames = {"Small Plant", "Medium Plant", "Tough Plant", "Boss Plant"}
+local plantNames = {
+    ["Small Plant"]  = true,
+    ["Medium Plant"] = true,
+    ["Tough Plant"]  = true,
+    ["Boss Plant"]   = true,
+}
 
-local function getPlants()
-    local plants = {}
-    local ok, plantRush = pcall(function()
-        return InteractiveEvents:WaitForChild("PlantRush", 2)
-    end)
-    if not ok or not plantRush then return plants end
-    local ok2, runtime = pcall(function()
-        return plantRush:WaitForChild("Runtime", 2)
-    end)
-    if not ok2 or not runtime then return plants end
-    for _, child in ipairs(runtime:GetChildren()) do
-        for _, name in ipairs(plantNames) do
-            if child.Name == name then
-                table.insert(plants, child)
-                break
-            end
-        end
-    end
-    return plants
-end
+-- Интервал обновления зомби — каждые 0.1 сек, не каждый кадр
+local zombieTimer = 0
+local ZOMBIE_INTERVAL = 0.1
 
 local function getMonsters()
     local monsters = {}
     for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("Model") and obj:FindFirstChild("Humanoid") and obj ~= character then
-            local h = obj:FindFirstChild("Humanoid")
+        if obj:IsA("Model") and obj ~= character then
+            local h = obj:FindFirstChildOfClass("Humanoid")
             if h and h.Health > 0 then
                 local root = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
-                if root then table.insert(monsters, root) end
+                if root then
+                    monsters[#monsters + 1] = root
+                end
             end
         end
     end
@@ -88,179 +70,280 @@ local function getMonsters()
 end
 
 local function startZombie()
-    zombieConn = RunService.Heartbeat:Connect(function()
-        local plants   = getPlants()
+    zombieConn = RunService.Heartbeat:Connect(function(dt)
+        if not zombieActive then return end
+        zombieTimer = zombieTimer + dt
+        if zombieTimer < ZOMBIE_INTERVAL then return end
+        zombieTimer = 0
+
+        if not plantRuntime then return end
+
+        -- Собираем растения
+        local plants = {}
+        for _, child in ipairs(plantRuntime:GetChildren()) do
+            if plantNames[child.Name] and child:IsA("Model") and child.PrimaryPart then
+                plants[#plants + 1] = child
+            end
+        end
+        if #plants == 0 then return end
+
         local monsters = getMonsters()
-        if #plants == 0 or #monsters == 0 then return end
+        if #monsters == 0 then return end
 
         for _, plant in ipairs(plants) do
-            local plantPart = plant.PrimaryPart
-            if not plantPart then continue end
+            local pp = plant.PrimaryPart
             local bestMon, bestDist = nil, math.huge
             for _, mRoot in ipairs(monsters) do
-                local d = (mRoot.Position - plantPart.Position).Magnitude
-                if d < bestDist then
-                    bestDist = d
-                    bestMon  = mRoot
+                if mRoot and mRoot.Parent then
+                    local d = (mRoot.Position - pp.Position).Magnitude
+                    if d < bestDist then
+                        bestDist = d
+                        bestMon  = mRoot
+                    end
                 end
             end
             if bestMon then
-                plant:SetPrimaryPartCFrame(
-                    CFrame.new(plantPart.Position, bestMon.Position)
-                )
+                -- Поворачиваем только по горизонтали
+                local dir = (bestMon.Position - pp.Position) * Vector3.new(1, 0, 1)
+                if dir.Magnitude > 0.1 then
+                    plant:SetPrimaryPartCFrame(
+                        CFrame.new(pp.Position, pp.Position + dir.Unit)
+                    )
+                end
             end
         end
     end)
 end
 
 local function stopZombie()
+    zombieActive = false
     if zombieConn then
         zombieConn:Disconnect()
         zombieConn = nil
     end
+    zombieTimer = 0
 end
 
 -- ========================
---    ПЧЁЛЫ — QueenBee
+--  ПЧЁЛЫ — платформы
 -- ========================
-local function getHoneycombs()
-    local combs = {}
-    local ok, queenBee = pcall(function()
-        return InteractiveEvents:WaitForChild("QueenBee", 2)
+local PLATFORM_SIZE    = Vector3.new(10, 1, 10)
+local PLATFORM_COLOR   = Color3.fromRGB(255, 200, 50)
+local PLATFORM_OFFSET  = Vector3.new(0, -2, 0) -- чуть ниже центра модели
+
+local function createPlatform(honeycomb)
+    -- Если уже есть — не дублируем
+    if platforms[honeycomb] then return end
+
+    local part = Instance.new("Part")
+    part.Name          = "HoneycombPlatform"
+    part.Size          = PLATFORM_SIZE
+    part.Anchored      = true
+    part.CanCollide    = true
+    part.CastShadow    = false
+    part.Material      = Enum.Material.SmoothPlastic
+    part.BrickColor    = BrickColor.new("Bright yellow")
+    part.Color         = PLATFORM_COLOR
+    part.Transparency  = 0.25
+
+    local uiCorner = Instance.new("SpecialMesh")
+    uiCorner.MeshType = Enum.MeshType.Brick
+    uiCorner.Parent   = part
+
+    -- Позиция: под центром модели
+    local target = honeycomb:IsA("Model") and honeycomb.PrimaryPart or honeycomb
+    if not target then part:Destroy(); return end
+
+    part.CFrame = CFrame.new(target.Position + PLATFORM_OFFSET)
+    part.Parent = Workspace
+
+    platforms[honeycomb] = part
+
+    -- Удаляем платформу когда honeycomb пропадает
+    honeycomb.AncestryChanged:Connect(function(_, newParent)
+        if newParent == nil then
+            if platforms[honeycomb] then
+                platforms[honeycomb]:Destroy()
+                platforms[honeycomb] = nil
+            end
+        end
     end)
-    if not ok or not queenBee then return combs end
-    local ok2, runtime = pcall(function()
-        return queenBee:WaitForChild("RuntimeHoneycombs", 2)
-    end)
-    if not ok2 or not runtime then return combs end
-    for _, child in ipairs(runtime:GetChildren()) do
+end
+
+local function removePlatform(honeycomb)
+    if platforms[honeycomb] then
+        platforms[honeycomb]:Destroy()
+        platforms[honeycomb] = nil
+    end
+end
+
+local function removeAllPlatforms()
+    for comb, plat in pairs(platforms) do
+        if plat and plat.Parent then plat:Destroy() end
+        platforms[comb] = nil
+    end
+end
+
+-- Следим за появлением новых Honeycomb
+local honeycombAddedConn   = nil
+local honeycombRemovedConn = nil
+
+local function watchHoneycombs()
+    if not honeycombFolder then return end
+
+    -- Платформы под уже существующими
+    for _, child in ipairs(honeycombFolder:GetChildren()) do
         if child.Name == "Honeycomb" then
-            table.insert(combs, child)
+            createPlatform(child)
         end
     end
-    return combs
+
+    honeycombAddedConn = honeycombFolder.ChildAdded:Connect(function(child)
+        if child.Name == "Honeycomb" then
+            task.wait(0.05) -- дать модели загрузиться
+            createPlatform(child)
+        end
+    end)
+
+    honeycombRemovedConn = honeycombFolder.ChildRemoved:Connect(function(child)
+        removePlatform(child)
+    end)
 end
 
+local function unwatchHoneycombs()
+    if honeycombAddedConn   then honeycombAddedConn:Disconnect();   honeycombAddedConn   = nil end
+    if honeycombRemovedConn then honeycombRemovedConn:Disconnect(); honeycombRemovedConn = nil end
+    removeAllPlatforms()
+end
+
+-- ========================
+--    ПЧЁЛЫ — телепорт
+-- ========================
 local function pressE()
-    -- Симулируем нажатие E через FireServer / VirtualInputManager
     local vInput = game:GetService("VirtualInputManager")
     if vInput then
         vInput:SendKeyEvent(true,  Enum.KeyCode.E, false, game)
         task.wait(1)
         vInput:SendKeyEvent(false, Enum.KeyCode.E, false, game)
     else
-        -- fallback: просто ждём
         task.wait(1)
     end
 end
 
-local function teleportToNearest(combs)
-    if #combs == 0 then return end
-    local pos    = rootPart.Position
+local function getNearestHoneycomb()
+    if not honeycombFolder then return nil end
+    local pos = rootPart.Position
     local nearest, bestDist = nil, math.huge
-    for _, comb in ipairs(combs) do
-        local part = comb:IsA("Model") and comb.PrimaryPart or (comb:IsA("BasePart") and comb)
-        if part then
-            local d = (part.Position - pos).Magnitude
-            if d < bestDist then
-                bestDist = d
-                nearest  = part
+    for _, comb in ipairs(honeycombFolder:GetChildren()) do
+        if comb.Name == "Honeycomb" then
+            local part = comb:IsA("Model") and comb.PrimaryPart or (comb:IsA("BasePart") and comb)
+            if part then
+                local d = (part.Position - pos).Magnitude
+                if d < bestDist then
+                    bestDist = d
+                    nearest  = part
+                end
             end
         end
     end
-    if nearest then
-        rootPart.CFrame = CFrame.new(nearest.Position + Vector3.new(0, 3, 0))
-    end
+    return nearest
 end
 
 local function startBees()
-    beeThread = task.spawn(function()
+    -- Сначала ставим платформы
+    task.spawn(function()
+        -- Ждём пока папка загрузится если ещё нет
+        local tries = 0
+        while not honeycombFolder and tries < 20 do
+            task.wait(0.5)
+            tries = tries + 1
+        end
+        watchHoneycombs()
+    end)
+
+    task.spawn(function()
         while beeActive do
-            local combs = getHoneycombs()
-            if #combs == 0 then
-                task.wait(1)
-                continue
+            local nearest = getNearestHoneycomb()
+            if nearest then
+                -- Телепортируем на платформу (на 2 выше низа платформы)
+                rootPart.CFrame = CFrame.new(nearest.Position + Vector3.new(0, 4, 0))
+                pressE()
+                task.wait(0.2)
+            else
+                task.wait(0.5)
             end
-            teleportToNearest(combs)
-            pressE()
-            task.wait(0.3)
         end
     end)
 end
 
 local function stopBees()
-    beeActive  = false
-    beeThread  = nil
+    beeActive = false
+    unwatchHoneycombs()
 end
 
 -- ========================
 --         GUI
 -- ========================
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name          = "AutoMenu"
-screenGui.ResetOnSpawn  = false
+screenGui.Name           = "AutoMenu"
+screenGui.ResetOnSpawn   = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-screenGui.Parent        = player.PlayerGui
+screenGui.Parent         = player.PlayerGui
 
--- Фрейм
 local frame = Instance.new("Frame")
-frame.Size              = UDim2.new(0, 220, 0, 160)
-frame.Position          = UDim2.new(0.5, -110, 0, 20)
-frame.BackgroundColor3  = Color3.fromRGB(12, 12, 20)
-frame.BorderSizePixel   = 0
-frame.Active            = true
-frame.Draggable         = true
-frame.Parent            = screenGui
+frame.Size             = UDim2.new(0, 220, 0, 160)
+frame.Position         = UDim2.new(0.5, -110, 0, 20)
+frame.BackgroundColor3 = Color3.fromRGB(12, 12, 20)
+frame.BorderSizePixel  = 0
+frame.Active           = true
+frame.Draggable        = true
+frame.Parent           = screenGui
 
--- Скруглённые углы
 local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(0, 10)
 corner.Parent       = frame
 
--- Обводка
 local stroke = Instance.new("UIStroke")
 stroke.Color        = Color3.fromRGB(80, 160, 255)
 stroke.Thickness    = 1.5
 stroke.Transparency = 0.4
 stroke.Parent       = frame
 
--- Заголовок
 local title = Instance.new("TextLabel")
-title.Size              = UDim2.new(1, 0, 0, 36)
-title.Position          = UDim2.new(0, 0, 0, 0)
-title.BackgroundColor3  = Color3.fromRGB(20, 60, 130)
-title.BorderSizePixel   = 0
-title.Text              = "⚡ AUTO SCRIPT"
-title.TextColor3        = Color3.fromRGB(200, 220, 255)
-title.Font              = Enum.Font.GothamBold
-title.TextSize          = 15
-title.Parent            = frame
+title.Size             = UDim2.new(1, 0, 0, 36)
+title.Position         = UDim2.new(0, 0, 0, 0)
+title.BackgroundColor3 = Color3.fromRGB(20, 60, 130)
+title.BorderSizePixel  = 0
+title.Text             = "⚡ AUTO SCRIPT"
+title.TextColor3       = Color3.fromRGB(200, 220, 255)
+title.Font             = Enum.Font.GothamBold
+title.TextSize         = 15
+title.Parent           = frame
 
 local titleCorner = Instance.new("UICorner")
 titleCorner.CornerRadius = UDim.new(0, 10)
 titleCorner.Parent       = title
 
--- Функция создания кнопки-тогла
 local function makeToggleButton(text, yPos)
     local btn = Instance.new("TextButton")
-    btn.Size              = UDim2.new(0, 190, 0, 44)
-    btn.Position          = UDim2.new(0.5, -95, 0, yPos)
-    btn.BackgroundColor3  = Color3.fromRGB(25, 25, 40)
-    btn.BorderSizePixel   = 0
-    btn.Text              = "▶  " .. text .. "  [ВЫКЛ]"
-    btn.TextColor3        = Color3.fromRGB(160, 160, 180)
-    btn.Font              = Enum.Font.GothamSemibold
-    btn.TextSize          = 13
-    btn.Parent            = frame
+    btn.Size             = UDim2.new(0, 190, 0, 44)
+    btn.Position         = UDim2.new(0.5, -95, 0, yPos)
+    btn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
+    btn.BorderSizePixel  = 0
+    btn.Text             = "▶  " .. text .. "  [ВЫКЛ]"
+    btn.TextColor3       = Color3.fromRGB(160, 160, 180)
+    btn.Font             = Enum.Font.GothamSemibold
+    btn.TextSize         = 13
+    btn.Parent           = frame
 
     local bCorner = Instance.new("UICorner")
     bCorner.CornerRadius = UDim.new(0, 8)
     bCorner.Parent       = btn
 
     local bStroke = Instance.new("UIStroke")
-    bStroke.Color        = Color3.fromRGB(60, 60, 90)
-    bStroke.Thickness    = 1
-    bStroke.Parent       = btn
+    bStroke.Color     = Color3.fromRGB(60, 60, 90)
+    bStroke.Thickness = 1
+    bStroke.Parent    = btn
 
     return btn, bStroke
 end
@@ -268,46 +351,43 @@ end
 local zombieBtn, zombieStroke = makeToggleButton("🧟 Зомби",  48)
 local beeBtn,    beeStroke    = makeToggleButton("🐝 Пчёлы", 102)
 
--- Тогл Зомби
 zombieBtn.MouseButton1Click:Connect(function()
     zombieActive = not zombieActive
     if zombieActive then
         startZombie()
-        zombieBtn.Text            = "■  🧟 Зомби  [ВКЛ]"
-        zombieBtn.TextColor3      = Color3.fromRGB(100, 255, 140)
+        zombieBtn.Text             = "■  🧟 Зомби  [ВКЛ]"
+        zombieBtn.TextColor3       = Color3.fromRGB(100, 255, 140)
         zombieBtn.BackgroundColor3 = Color3.fromRGB(10, 40, 20)
-        zombieStroke.Color        = Color3.fromRGB(60, 200, 100)
+        zombieStroke.Color         = Color3.fromRGB(60, 200, 100)
     else
         stopZombie()
-        zombieBtn.Text            = "▶  🧟 Зомби  [ВЫКЛ]"
-        zombieBtn.TextColor3      = Color3.fromRGB(160, 160, 180)
+        zombieBtn.Text             = "▶  🧟 Зомби  [ВЫКЛ]"
+        zombieBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
         zombieBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-        zombieStroke.Color        = Color3.fromRGB(60, 60, 90)
+        zombieStroke.Color         = Color3.fromRGB(60, 60, 90)
     end
 end)
 
--- Тогл Пчёлы
 beeBtn.MouseButton1Click:Connect(function()
     beeActive = not beeActive
     if beeActive then
         startBees()
-        beeBtn.Text            = "■  🐝 Пчёлы  [ВКЛ]"
-        beeBtn.TextColor3      = Color3.fromRGB(255, 220, 80)
+        beeBtn.Text             = "■  🐝 Пчёлы  [ВКЛ]"
+        beeBtn.TextColor3       = Color3.fromRGB(255, 220, 80)
         beeBtn.BackgroundColor3 = Color3.fromRGB(40, 35, 0)
-        beeStroke.Color        = Color3.fromRGB(220, 180, 30)
+        beeStroke.Color         = Color3.fromRGB(220, 180, 30)
     else
         stopBees()
-        beeBtn.Text            = "▶  🐝 Пчёлы  [ВЫКЛ]"
-        beeBtn.TextColor3      = Color3.fromRGB(160, 160, 180)
+        beeBtn.Text             = "▶  🐝 Пчёлы  [ВЫКЛ]"
+        beeBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
         beeBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-        beeStroke.Color        = Color3.fromRGB(60, 60, 90)
+        beeStroke.Color         = Color3.fromRGB(60, 60, 90)
     end
 end)
 
--- Сброс при смерти/возрождении
 player.CharacterAdded:Connect(function(newChar)
     character = newChar
     rootPart  = newChar:WaitForChild("HumanoidRootPart")
-    if zombieActive then stopZombie(); startZombie() end
-    if beeActive    then stopBees();   beeActive = true; startBees() end
+    if zombieActive then stopZombie(); zombieActive = true; startZombie() end
+    if beeActive    then stopBees();   beeActive    = true; startBees()  end
 end)
