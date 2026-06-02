@@ -255,12 +255,10 @@ local function startAntiAfk()
         afkTimer = afkTimer + dt
         if afkTimer < AFK_INTERVAL then return end
         afkTimer = 0
-        -- прыгаем через VirtualInputManager — надёжнее чем humanoid.Jump
-        local vInput = game:GetService("VirtualInputManager")
-        if vInput then
-            vInput:SendKeyEvent(true,  Enum.KeyCode.Space, false, game)
-            task.wait(0.1)
-            vInput:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        -- прыгаем один раз
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.Jump = true
         end
     end)
 end
@@ -342,8 +340,6 @@ end
 local plantBtn, plantStroke = makeBtn("🌿 Авто Убийство Растений [H]", 48)
 local beeBtn,   beeStroke   = makeBtn("🐝 Пчёлы [J]",                 102)
 local afkBtn,   afkStroke   = makeBtn("💤 Анти-АФК [K]",              156)
-
--- вынес логику переключения в отдельные функции чтоб хоткеи и кнопки делали одно и то же
 
 local function togglePlant()
     plantKillActive = not plantKillActive
