@@ -1,9 +1,8 @@
--- AutoScript.lua
--- LocalScript → кидай в StarterPlayerScripts
-
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local Workspace        = game:GetService("Workspace")
+local DataStoreService = game:GetService("DataStoreService")
+local UserInputService = game:GetService("UserInputService")
 
 local player    = Players.LocalPlayer
 local camera    = Workspace.CurrentCamera
@@ -12,7 +11,6 @@ local rootPart  = character:WaitForChild("HumanoidRootPart")
 
 local InteractiveEvents = Workspace:WaitForChild("InteractiveEvents")
 
--- папки кэшируем один раз при старте, чтобы не дёргать WaitForChild каждый кадр
 local plantRuntime    = nil
 local honeycombFolder = nil
 
@@ -32,7 +30,6 @@ task.spawn(function()
     end
 end)
 
--- состояние трёх функций
 local plantKillActive = false
 local beeActive       = false
 local afkActive       = false
@@ -40,12 +37,29 @@ local afkActive       = false
 local plantKillConn   = nil
 local afkConn         = nil
 
--- платформы под сотами
 local platforms = {}
 
--- ================================================
---   АВТО УБИЙСТВО РАСТЕНИЙ
--- ================================================
+local SAVE_KEY = "AutoScript_" .. tostring(player.UserId)
+
+local function saveState()
+    local ok, err = pcall(function()
+        local store = DataStoreService:GetDataStore("AutoScriptState")
+        store:SetAsync(SAVE_KEY, {
+            plant = plantKillActive,
+            bee   = beeActive,
+            afk   = afkActive,
+        })
+    end)
+end
+
+local function loadState()
+    local data = nil
+    pcall(function()
+        local store = DataStoreService:GetDataStore("AutoScriptState")
+        data = store:GetAsync(SAVE_KEY)
+    end)
+    return data
+end
 
 local plantNames = {
     ["Small Plant"]  = true,
@@ -54,7 +68,6 @@ local plantNames = {
     ["Boss Plant"]   = true,
 }
 
--- ищем ближайший Plant к игроку
 local function getNearestPlant()
     if not plantRuntime then return nil end
     local myPos = rootPart.Position
@@ -76,51 +89,38 @@ local function getNearestPlant()
     return nearest
 end
 
--- берём Tomato Shooter из инвентаря если он там есть
 local function equipTomatoShooter()
     local backpack = player:FindFirstChild("Backpack")
     if backpack then
         local tool = backpack:FindFirstChild("Tomato Shooter")
         if tool then
-            -- перемещаем в Character — это и есть экипировка тула
             tool.Parent = character
             return true
         end
     end
-    -- может уже в руках
     if character:FindFirstChild("Tomato Shooter") then
         return true
     end
     return false
 end
 
-local aimTimer   = 0
-local AIM_RATE   = 0.05  -- обновление прицела ~20 раз в сек, этого хватает
+local aimTimer = 0
+local AIM_RATE = 0.05
 
 local function startPlantKill()
     plantKillConn = RunService.RenderStepped:Connect(function(dt)
         if not plantKillActive then return end
-
-        -- пытаемся взять шутер каждый тик пока не возьмём
         local hasGun = equipTomatoShooter()
         if not hasGun then return end
-
         aimTimer = aimTimer + dt
         if aimTimer < AIM_RATE then return end
         aimTimer = 0
-
         local target = getNearestPlant()
         if not target or not rootPart then return end
-
-        -- камера смотрит на цель, позиция камеры остаётся за спиной игрока
-        -- используем стандартный офсет чтобы не было ощущения телепорта
         local myPos     = rootPart.Position + Vector3.new(0, 1.5, 0)
         local targetPos = target.Position
-
-        -- небольшой офсет камеры назад чтобы игрок был в кадре
         local back = (myPos - targetPos).Unit * 8
         local camPos = myPos + back + Vector3.new(0, 2, 0)
-
         camera.CameraType = Enum.CameraType.Scriptable
         camera.CFrame = CFrame.new(camPos, targetPos)
     end)
@@ -133,13 +133,8 @@ local function stopPlantKill()
         plantKillConn = nil
     end
     aimTimer = 0
-    -- возвращаем нормальную камеру
     camera.CameraType = Enum.CameraType.Custom
 end
-
--- ================================================
---   ПЧЁЛЫ — платформы + телепорт
--- ================================================
 
 local function createPlatform(honeycomb)
     if platforms[honeycomb] then return end
@@ -147,7 +142,6 @@ local function createPlatform(honeycomb)
                 or honeycomb:IsA("BasePart") and honeycomb
                 or nil
     if not target then return end
-
     local part = Instance.new("Part")
     part.Name         = "HoneycombPlatform"
     part.Size         = Vector3.new(10, 1, 10)
@@ -160,7 +154,6 @@ local function createPlatform(honeycomb)
     part.CFrame       = CFrame.new(target.Position + Vector3.new(0, -2, 0))
     part.Parent       = Workspace
     platforms[honeycomb] = part
-
     honeycomb.AncestryChanged:Connect(function(_, newParent)
         if newParent == nil and platforms[honeycomb] then
             platforms[honeycomb]:Destroy()
@@ -252,12 +245,8 @@ local function stopBees()
     unwatchHoneycombs()
 end
 
--- ================================================
---   АНТИ-АФК
--- ================================================
-
-local afkTimer    = 0
-local AFK_INTERVAL = 55  -- чуть меньше минуты, с запасом
+local afkTimer     = 0
+local AFK_INTERVAL = 55
 
 local function startAntiAfk()
     afkConn = RunService.Heartbeat:Connect(function(dt)
@@ -279,10 +268,6 @@ local function stopAntiAfk()
     if afkConn then afkConn:Disconnect(); afkConn = nil end
     afkTimer = 0
 end
-
--- ================================================
---   GUI
--- ================================================
 
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name           = "AutoMenu"
@@ -348,67 +333,115 @@ local function makeBtn(labelText, yPos)
     return btn, s
 end
 
-local plantBtn, plantStroke = makeBtn("🌿 Авто Убийство Растений", 48)
-local beeBtn,   beeStroke   = makeBtn("🐝 Пчёлы",                 102)
-local afkBtn,   afkStroke   = makeBtn("💤 Анти-АФК",              156)
+local plantBtn, plantStroke = makeBtn("🌿 Авто Убийство Растений [H]", 48)
+local beeBtn,   beeStroke   = makeBtn("🐝 Пчёлы [J]",                 102)
+local afkBtn,   afkStroke   = makeBtn("💤 Анти-АФК [K]",              156)
 
--- клик по кнопке растений
+local function setPlantOn()
+    startPlantKill()
+    plantBtn.Text             = "■  🌿 Авто Убийство Растений [H]  [ВКЛ]"
+    plantBtn.TextColor3       = Color3.fromRGB(100, 255, 140)
+    plantBtn.BackgroundColor3 = Color3.fromRGB(10, 40, 20)
+    plantStroke.Color         = Color3.fromRGB(60, 200, 100)
+end
+
+local function setPlantOff()
+    stopPlantKill()
+    plantBtn.Text             = "▶  🌿 Авто Убийство Растений [H]  [ВЫКЛ]"
+    plantBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
+    plantBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
+    plantStroke.Color         = Color3.fromRGB(60, 60, 90)
+end
+
+local function setBeeOn()
+    startBees()
+    beeBtn.Text             = "■  🐝 Пчёлы [J]  [ВКЛ]"
+    beeBtn.TextColor3       = Color3.fromRGB(255, 220, 80)
+    beeBtn.BackgroundColor3 = Color3.fromRGB(40, 35, 0)
+    beeStroke.Color         = Color3.fromRGB(220, 180, 30)
+end
+
+local function setBeeOff()
+    stopBees()
+    beeBtn.Text             = "▶  🐝 Пчёлы [J]  [ВЫКЛ]"
+    beeBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
+    beeBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
+    beeStroke.Color         = Color3.fromRGB(60, 60, 90)
+end
+
+local function setAfkOn()
+    startAntiAfk()
+    afkBtn.Text             = "■  💤 Анти-АФК [K]  [ВКЛ]"
+    afkBtn.TextColor3       = Color3.fromRGB(150, 180, 255)
+    afkBtn.BackgroundColor3 = Color3.fromRGB(10, 20, 50)
+    afkStroke.Color         = Color3.fromRGB(80, 120, 255)
+end
+
+local function setAfkOff()
+    stopAntiAfk()
+    afkBtn.Text             = "▶  💤 Анти-АФК [K]  [ВЫКЛ]"
+    afkBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
+    afkBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
+    afkStroke.Color         = Color3.fromRGB(60, 60, 90)
+end
+
 plantBtn.MouseButton1Click:Connect(function()
     plantKillActive = not plantKillActive
-    if plantKillActive then
-        startPlantKill()
-        plantBtn.Text             = "■  🌿 Авто Убийство Растений  [ВКЛ]"
-        plantBtn.TextColor3       = Color3.fromRGB(100, 255, 140)
-        plantBtn.BackgroundColor3 = Color3.fromRGB(10, 40, 20)
-        plantStroke.Color         = Color3.fromRGB(60, 200, 100)
-    else
-        stopPlantKill()
-        plantBtn.Text             = "▶  🌿 Авто Убийство Растений  [ВЫКЛ]"
-        plantBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
-        plantBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-        plantStroke.Color         = Color3.fromRGB(60, 60, 90)
-    end
+    if plantKillActive then setPlantOn() else setPlantOff() end
+    saveState()
 end)
 
 beeBtn.MouseButton1Click:Connect(function()
     beeActive = not beeActive
-    if beeActive then
-        startBees()
-        beeBtn.Text             = "■  🐝 Пчёлы  [ВКЛ]"
-        beeBtn.TextColor3       = Color3.fromRGB(255, 220, 80)
-        beeBtn.BackgroundColor3 = Color3.fromRGB(40, 35, 0)
-        beeStroke.Color         = Color3.fromRGB(220, 180, 30)
-    else
-        stopBees()
-        beeBtn.Text             = "▶  🐝 Пчёлы  [ВЫКЛ]"
-        beeBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
-        beeBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-        beeStroke.Color         = Color3.fromRGB(60, 60, 90)
-    end
+    if beeActive then setBeeOn() else setBeeOff() end
+    saveState()
 end)
 
 afkBtn.MouseButton1Click:Connect(function()
     afkActive = not afkActive
-    if afkActive then
-        startAntiAfk()
-        afkBtn.Text             = "■  💤 Анти-АФК  [ВКЛ]"
-        afkBtn.TextColor3       = Color3.fromRGB(150, 180, 255)
-        afkBtn.BackgroundColor3 = Color3.fromRGB(10, 20, 50)
-        afkStroke.Color         = Color3.fromRGB(80, 120, 255)
-    else
-        stopAntiAfk()
-        afkBtn.Text             = "▶  💤 Анти-АФК  [ВЫКЛ]"
-        afkBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
-        afkBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-        afkStroke.Color         = Color3.fromRGB(60, 60, 90)
+    if afkActive then setAfkOn() else setAfkOff() end
+    saveState()
+end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.H then
+        plantKillActive = not plantKillActive
+        if plantKillActive then setPlantOn() else setPlantOff() end
+        saveState()
+    elseif input.KeyCode == Enum.KeyCode.J then
+        beeActive = not beeActive
+        if beeActive then setBeeOn() else setBeeOff() end
+        saveState()
+    elseif input.KeyCode == Enum.KeyCode.K then
+        afkActive = not afkActive
+        if afkActive then setAfkOn() else setAfkOff() end
+        saveState()
     end
 end)
 
--- пересоздаём ссылки на character после смерти
 player.CharacterAdded:Connect(function(newChar)
     character = newChar
     rootPart  = newChar:WaitForChild("HumanoidRootPart")
     camera    = Workspace.CurrentCamera
     if plantKillActive then stopPlantKill(); plantKillActive = true; startPlantKill() end
     if beeActive       then stopBees();      beeActive       = true; startBees()      end
+end)
+
+task.spawn(function()
+    task.wait(2)
+    local saved = loadState()
+    if not saved then return end
+    if saved.plant then
+        plantKillActive = true
+        setPlantOn()
+    end
+    if saved.bee then
+        beeActive = true
+        setBeeOn()
+    end
+    if saved.afk then
+        afkActive = true
+        setAfkOn()
+    end
 end)
