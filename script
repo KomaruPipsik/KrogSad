@@ -13,6 +13,7 @@ local InteractiveEvents = Workspace:WaitForChild("InteractiveEvents")
 
 local plantRuntime    = nil
 local honeycombFolder = nil
+local whackRuntime    = nil
 
 task.spawn(function()
     local ok, plantRush = pcall(function() return InteractiveEvents:WaitForChild("PlantRush", 10) end)
@@ -30,24 +31,32 @@ task.spawn(function()
     end
 end)
 
+task.spawn(function()
+    local ok, rt = pcall(function() return InteractiveEvents:WaitForChild("WhackACropRuntime", 10) end)
+    if ok and rt then whackRuntime = rt end
+end)
+
 local plantKillActive = false
 local beeActive       = false
 local afkActive       = false
+local whackActive     = false
 
 local plantKillConn   = nil
 local afkConn         = nil
+local whackClickConn  = nil
 
 local platforms = {}
 
 local SAVE_KEY = "AutoScript_" .. tostring(player.UserId)
 
 local function saveState()
-    local ok, err = pcall(function()
+    pcall(function()
         local store = DataStoreService:GetDataStore("AutoScriptState")
         store:SetAsync(SAVE_KEY, {
             plant = plantKillActive,
             bee   = beeActive,
             afk   = afkActive,
+            whack = whackActive,
         })
     end)
 end
@@ -79,10 +88,7 @@ local function getNearestPlant()
                       or nil
             if part then
                 local d = (part.Position - myPos).Magnitude
-                if d < bestDist then
-                    bestDist = d
-                    nearest  = part
-                end
+                if d < bestDist then bestDist = d; nearest = part end
             end
         end
     end
@@ -93,14 +99,9 @@ local function equipTomatoShooter()
     local backpack = player:FindFirstChild("Backpack")
     if backpack then
         local tool = backpack:FindFirstChild("Tomato Shooter")
-        if tool then
-            tool.Parent = character
-            return true
-        end
+        if tool then tool.Parent = character; return true end
     end
-    if character:FindFirstChild("Tomato Shooter") then
-        return true
-    end
+    if character:FindFirstChild("Tomato Shooter") then return true end
     return false
 end
 
@@ -119,8 +120,8 @@ local function startPlantKill()
         if not target or not rootPart then return end
         local myPos     = rootPart.Position + Vector3.new(0, 1.5, 0)
         local targetPos = target.Position
-        local back = (myPos - targetPos).Unit * 8
-        local camPos = myPos + back + Vector3.new(0, 2, 0)
+        local back      = (myPos - targetPos).Unit * 8
+        local camPos    = myPos + back + Vector3.new(0, 2, 0)
         camera.CameraType = Enum.CameraType.Scriptable
         camera.CFrame = CFrame.new(camPos, targetPos)
     end)
@@ -128,10 +129,7 @@ end
 
 local function stopPlantKill()
     plantKillActive = false
-    if plantKillConn then
-        plantKillConn:Disconnect()
-        plantKillConn = nil
-    end
+    if plantKillConn then plantKillConn:Disconnect(); plantKillConn = nil end
     aimTimer = 0
     camera.CameraType = Enum.CameraType.Custom
 end
@@ -269,6 +267,86 @@ local function stopAntiAfk()
     afkTimer = 0
 end
 
+local function getFirstWhackTarget()
+    if not whackRuntime then return nil end
+    for _, child in ipairs(whackRuntime:GetChildren()) do
+        local part = child:IsA("Model") and child.PrimaryPart
+                  or child:IsA("BasePart") and child
+                  or nil
+        if part then return child, part end
+    end
+    return nil, nil
+end
+
+local function teleportToWhackTarget(part)
+    if not rootPart or not part then return end
+    rootPart.CFrame = CFrame.new(part.Position + Vector3.new(0, 4, 0))
+end
+
+local function startWhack()
+    task.spawn(function()
+        local tries = 0
+        while not whackRuntime and tries < 20 do task.wait(0.5); tries += 1 end
+
+        local vInput = game:GetService("VirtualInputManager")
+
+        local currentTarget = nil
+
+        local function onChildAdded(child)
+            if not whackActive then return end
+            local part = child:IsA("Model") and child.PrimaryPart
+                      or child:IsA("BasePart") and child
+                      or nil
+            if part then
+                currentTarget = part
+                teleportToWhackTarget(part)
+            end
+        end
+
+        local function onChildRemoved(child)
+            if not whackActive then return end
+            task.wait(0.05)
+            local newTarget, newPart = getFirstWhackTarget()
+            if newPart then
+                currentTarget = newPart
+                teleportToWhackTarget(newPart)
+            else
+                currentTarget = nil
+            end
+        end
+
+        local addedConn   = whackRuntime.ChildAdded:Connect(onChildAdded)
+        local removedConn = whackRuntime.ChildRemoved:Connect(onChildRemoved)
+
+        local _, startPart = getFirstWhackTarget()
+        if startPart then
+            currentTarget = startPart
+            teleportToWhackTarget(startPart)
+        end
+
+        whackClickConn = RunService.Heartbeat:Connect(function()
+            if not whackActive then return end
+            if not currentTarget or not currentTarget.Parent then return end
+            teleportToWhackTarget(currentTarget)
+            if vInput then
+                vInput:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+                vInput:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+            end
+        end)
+
+        while whackActive do task.wait(0.1) end
+
+        addedConn:Disconnect()
+        removedConn:Disconnect()
+        if whackClickConn then whackClickConn:Disconnect(); whackClickConn = nil end
+    end)
+end
+
+local function stopWhack()
+    whackActive = false
+    if whackClickConn then whackClickConn:Disconnect(); whackClickConn = nil end
+end
+
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name           = "AutoMenu"
 screenGui.ResetOnSpawn   = false
@@ -276,7 +354,7 @@ screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent         = player.PlayerGui
 
 local frame = Instance.new("Frame")
-frame.Size             = UDim2.new(0, 240, 0, 220)
+frame.Size             = UDim2.new(0, 240, 0, 272)
 frame.Position         = UDim2.new(0.5, -120, 0, 20)
 frame.BackgroundColor3 = Color3.fromRGB(12, 12, 20)
 frame.BorderSizePixel  = 0
@@ -334,8 +412,9 @@ local function makeBtn(labelText, yPos)
 end
 
 local plantBtn, plantStroke = makeBtn("🌿 Авто Убийство Растений [H]", 48)
-local beeBtn,   beeStroke   = makeBtn("🐝 Пчёлы [J]",                 102)
-local afkBtn,   afkStroke   = makeBtn("💤 Анти-АФК [K]",              156)
+local beeBtn,   beeStroke   = makeBtn("🐝 Пчёлы [J]",                  102)
+local afkBtn,   afkStroke   = makeBtn("💤 Анти-АФК [K]",               156)
+local whackBtn, whackStroke = makeBtn("👊 Удары [L]",                  210)
 
 local function setPlantOn()
     startPlantKill()
@@ -385,6 +464,22 @@ local function setAfkOff()
     afkStroke.Color         = Color3.fromRGB(60, 60, 90)
 end
 
+local function setWhackOn()
+    startWhack()
+    whackBtn.Text             = "■  👊 Удары [L]  [ВКЛ]"
+    whackBtn.TextColor3       = Color3.fromRGB(255, 140, 80)
+    whackBtn.BackgroundColor3 = Color3.fromRGB(45, 20, 10)
+    whackStroke.Color         = Color3.fromRGB(220, 100, 40)
+end
+
+local function setWhackOff()
+    stopWhack()
+    whackBtn.Text             = "▶  👊 Удары [L]  [ВЫКЛ]"
+    whackBtn.TextColor3       = Color3.fromRGB(160, 160, 180)
+    whackBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
+    whackStroke.Color         = Color3.fromRGB(60, 60, 90)
+end
+
 plantBtn.MouseButton1Click:Connect(function()
     plantKillActive = not plantKillActive
     if plantKillActive then setPlantOn() else setPlantOff() end
@@ -403,6 +498,12 @@ afkBtn.MouseButton1Click:Connect(function()
     saveState()
 end)
 
+whackBtn.MouseButton1Click:Connect(function()
+    whackActive = not whackActive
+    if whackActive then setWhackOn() else setWhackOff() end
+    saveState()
+end)
+
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     if input.KeyCode == Enum.KeyCode.H then
@@ -417,6 +518,10 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         afkActive = not afkActive
         if afkActive then setAfkOn() else setAfkOff() end
         saveState()
+    elseif input.KeyCode == Enum.KeyCode.L then
+        whackActive = not whackActive
+        if whackActive then setWhackOn() else setWhackOff() end
+        saveState()
     end
 end)
 
@@ -426,22 +531,15 @@ player.CharacterAdded:Connect(function(newChar)
     camera    = Workspace.CurrentCamera
     if plantKillActive then stopPlantKill(); plantKillActive = true; startPlantKill() end
     if beeActive       then stopBees();      beeActive       = true; startBees()      end
+    if whackActive     then stopWhack();     whackActive     = true; startWhack()     end
 end)
 
 task.spawn(function()
     task.wait(2)
     local saved = loadState()
     if not saved then return end
-    if saved.plant then
-        plantKillActive = true
-        setPlantOn()
-    end
-    if saved.bee then
-        beeActive = true
-        setBeeOn()
-    end
-    if saved.afk then
-        afkActive = true
-        setAfkOn()
-    end
+    if saved.plant then plantKillActive = true; setPlantOn() end
+    if saved.bee   then beeActive       = true; setBeeOn()   end
+    if saved.afk   then afkActive       = true; setAfkOn()   end
+    if saved.whack then whackActive     = true; setWhackOn() end
 end)
